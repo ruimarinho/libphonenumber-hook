@@ -1,6 +1,0 @@
-curl -X POST https://ruimarinho.o6s.io/webhooks \
--H 'User-Agent: GitHub-Hookshot/4cd0928' \
--H 'X-GitHub-Event: push' \
--H 'X-GitHub-Delivery: b8e83f2a-0bf0-11e8-885c-b813bbeb8910' \
--H 'Content-Type: application/json' \
--d @tag.json
