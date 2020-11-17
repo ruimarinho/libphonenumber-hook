@@ -179,6 +179,7 @@ func Commit(version string, directory string, repository *git.Repository, option
 	tag := strings.Replace(version, ".", "-", -1)
 	pushOptions := git.PushOptions{
 		RefSpecs: []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", fmt.Sprintf(remoteBranchFormat, tag), fmt.Sprintf(remoteBranchFormat, tag)))},
+		Force:    true,
 		Auth: &githttp.BasicAuth{
 			Username: remoteRepositoryUsername,
 			Password: os.Getenv("GITHUB_TOKEN"),
