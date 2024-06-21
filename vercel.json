@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/handler.go": {
+      "maxDuration": 60
+    }
+  },
   "routes": [
     { "src": "/", "dest": "api/handler.go" }
   ]

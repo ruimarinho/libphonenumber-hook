@@ -16,9 +16,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/google/go-github/v32/github"
+	"github.com/google/go-github/v62/github"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
 	webhook "gopkg.in/go-playground/webhooks.v5/github"
 )
 
@@ -231,9 +230,7 @@ func Download(path string, directory string) (*os.File, error) {
 // OpenPullRequest opens a pull request for a specific branch.
 func OpenPullRequest(version string) error {
 	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: os.Getenv("GITHUB_TOKEN")})
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
+	client := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 	pull, _, err := client.PullRequests.Create(ctx, remoteRepositoryUsername, remoteRepositoryName, &github.NewPullRequest{
 		Title: github.String(fmt.Sprintf("Update libphonenumber@%s", version)),
 		Head:  github.String(fmt.Sprintf(remoteBranchFormat, strings.Replace(version, ".", "-", -1))),
