@@ -1,12 +1,12 @@
 module github.com/ruimarinho/libphonenumber-hook
 
-go 1.21
+go 1.23
 
-toolchain go1.22.4
+toolchain go1.25.7
 
 require (
 	github.com/go-git/go-git/v5 v5.12.0
-	github.com/google/go-github/v62 v62.0.0
+	github.com/google/go-github/v68 v68.0.0
 	github.com/sirupsen/logrus v1.9.3
 	gopkg.in/go-playground/webhooks.v5 v5.15.0
 )
