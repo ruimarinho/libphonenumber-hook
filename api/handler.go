@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -250,22 +251,158 @@ func Download(path string, directory string) (*os.File, error) {
 	return file, nil
 }
 
-// OpenPullRequest opens a pull request for a specific branch.
+// OpenPullRequest opens a pull request for a specific branch and enables
+// auto-merge so GitHub merges it once all required status checks pass.
 func OpenPullRequest(version string) error {
 	ctx := context.Background()
 	client := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
+	branch := fmt.Sprintf(remoteBranchFormat, strings.ReplaceAll(version, ".", "-"))
+
 	pull, _, err := client.PullRequests.Create(ctx, remoteRepositoryUsername, remoteRepositoryName, &github.NewPullRequest{
 		Title: github.Ptr(fmt.Sprintf("Update libphonenumber@%s", version)),
-		Head:  github.Ptr(fmt.Sprintf(remoteBranchFormat, strings.ReplaceAll(version, ".", "-"))),
+		Head:  github.Ptr(branch),
 		Base:  github.Ptr("master"),
 		Body:  github.Ptr(fmt.Sprintf("Update libphonenumber@%s.", version)),
 	})
 
 	if err != nil {
+		// A retried delivery finds the pull request from the previous attempt
+		// still open, so recover it and enable auto-merge on it instead.
+		existing, findErr := findOpenPullRequest(ctx, client, branch)
+		if findErr != nil || existing == nil {
+			return err
+		}
+
+		log.Infof("Pull request #%d already open (%v)", existing.GetNumber(), existing.GetHTMLURL())
+		pull = existing
+	} else {
+		log.Infof("Pull request #%d opened (%v)", pull.GetNumber(), pull.GetHTMLURL())
+	}
+
+	if pull.GetAutoMerge() == nil {
+		if err := EnableAutoMerge(ctx, client, pull.GetNodeID()); err != nil {
+			return fmt.Errorf("enable auto-merge on pull request #%d: %w", pull.GetNumber(), err)
+		}
+
+		log.Infof("Auto-merge enabled on pull request #%d", pull.GetNumber())
+	} else {
+		log.Infof("Auto-merge already enabled on pull request #%d", pull.GetNumber())
+	}
+
+	CloseSupersededPullRequests(ctx, client, version, pull.GetNumber())
+
+	return nil
+}
+
+// CloseSupersededPullRequests closes open update pull requests for versions
+// older than the one just opened, as their metadata is outdated and they
+// would conflict once the newer pull request merges. Failures are logged
+// but not returned, as cleanup should not fail the webhook.
+func CloseSupersededPullRequests(ctx context.Context, client *github.Client, version string, supersededBy int) {
+	pulls, _, err := client.PullRequests.List(ctx, remoteRepositoryUsername, remoteRepositoryName, &github.PullRequestListOptions{
+		State:       "open",
+		ListOptions: github.ListOptions{PerPage: 100},
+	})
+	if err != nil {
+		log.WithError(err).Warn("Failed to list open pull requests")
+		return
+	}
+
+	for _, pull := range pulls {
+		branch := pull.GetHead().GetRef()
+		if pull.GetNumber() == supersededBy || !strings.HasPrefix(branch, fmt.Sprintf(remoteBranchFormat, "")) {
+			continue
+		}
+
+		if !isOlderVersion(versionFromBranch(branch), version) {
+			continue
+		}
+
+		if _, _, err := client.Issues.CreateComment(ctx, remoteRepositoryUsername, remoteRepositoryName, pull.GetNumber(), &github.IssueComment{
+			Body: github.Ptr(fmt.Sprintf("Superseded by #%d.", supersededBy)),
+		}); err != nil {
+			log.WithError(err).Warnf("Failed to comment on pull request #%d", pull.GetNumber())
+		}
+
+		if _, _, err := client.PullRequests.Edit(ctx, remoteRepositoryUsername, remoteRepositoryName, pull.GetNumber(), &github.PullRequest{
+			State: github.Ptr("closed"),
+		}); err != nil {
+			log.WithError(err).Warnf("Failed to close pull request #%d", pull.GetNumber())
+			continue
+		}
+
+		log.Infof("Closed pull request #%d superseded by #%d", pull.GetNumber(), supersededBy)
+	}
+}
+
+// versionFromBranch extracts the version encoded in an update branch name.
+func versionFromBranch(branch string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(branch, fmt.Sprintf(remoteBranchFormat, "")), "-", ".")
+}
+
+// isOlderVersion reports whether version a is strictly older than version b,
+// comparing dot-separated numeric components.
+func isOlderVersion(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		ai, aErr := strconv.Atoi(as[i])
+		bi, bErr := strconv.Atoi(bs[i])
+		if aErr != nil || bErr != nil {
+			return false
+		}
+
+		if ai != bi {
+			return ai < bi
+		}
+	}
+
+	return len(as) < len(bs)
+}
+
+// findOpenPullRequest returns the open pull request for a branch, if any.
+func findOpenPullRequest(ctx context.Context, client *github.Client, branch string) (*github.PullRequest, error) {
+	pulls, _, err := client.PullRequests.List(ctx, remoteRepositoryUsername, remoteRepositoryName, &github.PullRequestListOptions{
+		Head:  fmt.Sprintf("%s:%s", remoteRepositoryUsername, branch),
+		State: "open",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pulls) == 0 {
+		return nil, nil
+	}
+
+	return pulls[0], nil
+}
+
+// EnableAutoMerge enables auto-merge on a pull request. GitHub only exposes
+// this operation through the GraphQL API.
+func EnableAutoMerge(ctx context.Context, client *github.Client, nodeID string) error {
+	request, err := client.NewRequest(http.MethodPost, "graphql", map[string]any{
+		"query": "mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { clientMutationId } }",
+		"variables": map[string]any{
+			"pullRequestId": nodeID,
+		},
+	})
+	if err != nil {
 		return err
 	}
 
-	log.Info(fmt.Sprintf("Pull request #%d opened (%v)", *pull.Number, *pull.HTMLURL))
+	var response struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	if _, err := client.Do(ctx, request, &response); err != nil {
+		return err
+	}
+
+	if len(response.Errors) > 0 {
+		return fmt.Errorf("graphql: %s", response.Errors[0].Message)
+	}
 
 	return nil
 }
