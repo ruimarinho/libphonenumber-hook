@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -288,7 +289,75 @@ func OpenPullRequest(version string) error {
 		log.Infof("Auto-merge already enabled on pull request #%d", pull.GetNumber())
 	}
 
+	CloseSupersededPullRequests(ctx, client, version, pull.GetNumber())
+
 	return nil
+}
+
+// CloseSupersededPullRequests closes open update pull requests for versions
+// older than the one just opened, as their metadata is outdated and they
+// would conflict once the newer pull request merges. Failures are logged
+// but not returned, as cleanup should not fail the webhook.
+func CloseSupersededPullRequests(ctx context.Context, client *github.Client, version string, supersededBy int) {
+	pulls, _, err := client.PullRequests.List(ctx, remoteRepositoryUsername, remoteRepositoryName, &github.PullRequestListOptions{
+		State:       "open",
+		ListOptions: github.ListOptions{PerPage: 100},
+	})
+	if err != nil {
+		log.WithError(err).Warn("Failed to list open pull requests")
+		return
+	}
+
+	for _, pull := range pulls {
+		branch := pull.GetHead().GetRef()
+		if pull.GetNumber() == supersededBy || !strings.HasPrefix(branch, fmt.Sprintf(remoteBranchFormat, "")) {
+			continue
+		}
+
+		if !isOlderVersion(versionFromBranch(branch), version) {
+			continue
+		}
+
+		if _, _, err := client.Issues.CreateComment(ctx, remoteRepositoryUsername, remoteRepositoryName, pull.GetNumber(), &github.IssueComment{
+			Body: github.Ptr(fmt.Sprintf("Superseded by #%d.", supersededBy)),
+		}); err != nil {
+			log.WithError(err).Warnf("Failed to comment on pull request #%d", pull.GetNumber())
+		}
+
+		if _, _, err := client.PullRequests.Edit(ctx, remoteRepositoryUsername, remoteRepositoryName, pull.GetNumber(), &github.PullRequest{
+			State: github.Ptr("closed"),
+		}); err != nil {
+			log.WithError(err).Warnf("Failed to close pull request #%d", pull.GetNumber())
+			continue
+		}
+
+		log.Infof("Closed pull request #%d superseded by #%d", pull.GetNumber(), supersededBy)
+	}
+}
+
+// versionFromBranch extracts the version encoded in an update branch name.
+func versionFromBranch(branch string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(branch, fmt.Sprintf(remoteBranchFormat, "")), "-", ".")
+}
+
+// isOlderVersion reports whether version a is strictly older than version b,
+// comparing dot-separated numeric components.
+func isOlderVersion(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		ai, aErr := strconv.Atoi(as[i])
+		bi, bErr := strconv.Atoi(bs[i])
+		if aErr != nil || bErr != nil {
+			return false
+		}
+
+		if ai != bi {
+			return ai < bi
+		}
+	}
+
+	return len(as) < len(bs)
 }
 
 // findOpenPullRequest returns the open pull request for a branch, if any.

@@ -180,6 +180,36 @@ func TestEnableAutoMergeReturnsGraphQLErrors(t *testing.T) {
 	}
 }
 
+func TestIsOlderVersion(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"9.0.25", "9.0.28", true},
+		{"9.0.28", "9.0.25", false},
+		{"9.0.28", "9.0.28", false},
+		{"8.13.55", "9.0.1", true},
+		{"9.0.9", "9.0.10", true},
+		{"9.0", "9.0.1", true},
+		{"invalid", "9.0.1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s<%s", tt.a, tt.b), func(t *testing.T) {
+			if got := isOlderVersion(tt.a, tt.b); got != tt.want {
+				t.Errorf("isOlderVersion(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVersionFromBranch(t *testing.T) {
+	got := versionFromBranch("support/update-libphonenumber-9-0-28")
+	if got != "9.0.28" {
+		t.Errorf("versionFromBranch() = %q, want %q", got, "9.0.28")
+	}
+}
+
 // newTestGitHubClient returns a GitHub client pointed at a test server.
 func newTestGitHubClient(t *testing.T, server *httptest.Server) *github.Client {
 	t.Helper()
