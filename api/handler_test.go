@@ -1,13 +1,17 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/google/go-github/v68/github"
 	webhook "gopkg.in/go-playground/webhooks.v5/github"
 )
 
@@ -140,6 +144,55 @@ func TestHandlerRejectsGetRequests(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, w.Code)
 	}
+}
+
+func TestEnableAutoMergeSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Errorf("expected path /graphql, got %s", r.URL.Path)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": {"enablePullRequestAutoMerge": {"clientMutationId": null}}}`))
+	}))
+	defer server.Close()
+
+	err := EnableAutoMerge(context.Background(), newTestGitHubClient(t, server), "PR_123")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestEnableAutoMergeReturnsGraphQLErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": null, "errors": [{"message": "Pull request is in clean status"}]}`))
+	}))
+	defer server.Close()
+
+	err := EnableAutoMerge(context.Background(), newTestGitHubClient(t, server), "PR_123")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "clean status") {
+		t.Errorf("expected error to contain graphql message, got %v", err)
+	}
+}
+
+// newTestGitHubClient returns a GitHub client pointed at a test server.
+func newTestGitHubClient(t *testing.T, server *httptest.Server) *github.Client {
+	t.Helper()
+
+	client := github.NewClient(nil)
+	baseURL, err := url.Parse(server.URL + "/")
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	client.BaseURL = baseURL
+
+	return client
 }
 
 // downloadFromURL is a test helper that downloads from an arbitrary URL.
